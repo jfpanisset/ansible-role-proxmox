@@ -18,8 +18,6 @@
   when: "pve_cluster_enabled | bool"
 
 - import_tasks: ssh_cluster_config.yml
-  when:
-    - "pve_manage_ssh | bool and pve_cluster_enabled | bool"
 
 - name: Run handlers if needed (sshd reload)
   meta: flush_handlers
@@ -32,7 +30,8 @@
       {% for host in groups[pve_group] %}\
         {{ hostvars[host].pve_cluster_addr0 }}
         {{ hostvars[host].ansible_fqdn }}
-        {{ hostvars[host].ansible_hostname }}
+        {{ hostvars[host].ansible_hostname }}\
+        {% if ansible_fqdn == hostvars[host].ansible_fqdn %} pvelocalhost{% endif %}
 
 
       {% endfor %}"
@@ -41,7 +40,7 @@
   lineinfile:
     dest: /etc/hosts
     # expanded, this turns out to be, for example:
-    # regexp: "^(?!10\.0\.3\.17\\ test01\.lxc\\ test01)(?!10\.0\.3\.17)[0-9a-f:.]+(\s+.*)?\s(test01\.lxc|test01)(\s+.*|\s*)$'
+    # regexp: "^(?!10\.0\.3\.17\\ test01\.lxc\\ test01\\ pvelocalhost)(?!10\.0\.3\.17)[0-9a-f:.]+(\s+.*)?\s(test01\.lxc|test01|pvelocalhost)(\s+.*|\s*)$'
     # basically first we ignore lines that match from the host enumeration task
     # above, then we match against different IPs (e.g. NOT 10.0.3.17) that have
     # the hostname/fqdn we inserted a record for previously, taking care also to
@@ -67,12 +66,16 @@
     _correct_line: "\
       {{ hostvars[item].pve_cluster_addr0 }}
       {{ hostvars[item].ansible_fqdn }}
-      {{ hostvars[item].ansible_hostname }}"
+      {{ hostvars[item].ansible_hostname }}\
+      {% if ansible_fqdn == hostvars[item].ansible_fqdn %} pvelocalhost{% endif %}"
     _correct_ip: "{{ hostvars[item].pve_cluster_addr0 }}"
     _match_hosts: >-
       [
         "{{ hostvars[item].ansible_fqdn }}",
-        "{{ hostvars[item].ansible_hostname }}"
+        "{{ hostvars[item].ansible_hostname }}",
+        {% if ansible_fqdn == hostvars[item].ansible_fqdn %}
+          "pvelocalhost"
+        {% endif %}
       ]
 
 - name: Trust Proxmox' packaging key
@@ -254,6 +257,47 @@
   when:
     - not pve_cluster_enabled | bool or (pve_cluster_enabled and inventory_hostname == groups[pve_group][0])
     - pve_datacenter_cfg | length > 0
+
+- name: Check domains.cfg exists
+  stat:
+    path: "/etc/pve/domains.cfg"
+  register: _domains_cfg
+  when:
+    - not pve_cluster_enabled or (pve_cluster_enabled and inventory_hostname == groups[pve_group][0])
+    - pve_domains_cfg | length > 0
+
+- name: Create domains.cfg if it does not exist
+  file:
+    path: "/etc/pve/domains.cfg"
+    state: "touch"
+  when:
+    - not pve_cluster_enabled | bool or (pve_cluster_enabled and inventory_hostname == groups[pve_group][0])
+    - pve_domains_cfg | length > 0
+    - not _domains_cfg.stat.exists
+
+- name: Configure domains.cfg
+  # The parser for domains.cfg requires a blank line after each domain,
+  # and there's a TAB character before printing each key / value pair for a domain
+  copy:
+    dest: "/etc/pve/domains.cfg"
+    owner: "root"
+    group: "www-data"
+    mode: "0640"
+    content: |
+      {% for domain in pve_domains_cfg %}
+      {{ domain.type }}: {{ domain.name }}
+      {% for k,v in domain.items() %}
+      {% if k != 'name' %}
+      {% if k != 'type' %}
+      	{{ k }} {{ v }}
+      {% endif %}
+      {% endif %}
+      {% endfor %}
+
+      {% endfor %}
+  when:
+    - not pve_cluster_enabled | bool or (pve_cluster_enabled and inventory_hostname == groups[pve_group][0])
+    - pve_domains_cfg | length > 0
 
 - import_tasks: ssl_config.yml
   when:
